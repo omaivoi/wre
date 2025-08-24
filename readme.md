@@ -4,9 +4,9 @@
 # 快速开始
 + 克隆项目
 ```
-git clone github.com:omaivoi/wre.git
+git clone git@github.com:omaivoi/wre.git
 ```
-+ 像运行[wplacer](https://github.com/luluwaffless/wplacer)一样运行项目中的[wplacer](./wplacer)
++ 像运行[wplacer](https://github.com/luluwaffless/wplacer)一样运行项目中的[wplacer](https://github.com/omaivoi/wplacer)
 
 + 运行[main.py](./main.py)
 ```cmd
