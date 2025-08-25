@@ -33,8 +33,17 @@ ONLY_OVERLAY=env_bool(config.get("ONLY_OVERLAY",False))
 LOOP_SLEEP=int(config["LOOP_SLEEP"])
 LOOP_SLEEP_SHORT=int(config["LOOP_SLEEP_SHORT"])
 MAX_GETPOKEAUTHOR_THREAD=int(config["MAX_GETPOKEAUTHOR_THREAD"])
+HTTP_PROXY = config.get("HTTP_PROXY")
+HTTPS_PROXY = config.get("HTTPS_PROXY")
 
 # 请求配置
+if HTTP_PROXY and HTTPS_PROXY:
+    proxies = {
+        "http": HTTP_PROXY,
+        "https": HTTPS_PROXY
+    }
+else:
+    proxies = None
 UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
 MAX_RETRIES=999999 # 最大重试次数
 DELAY=1 # 每个请求和重试间延迟，单位秒
@@ -58,7 +67,7 @@ def clone_area(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=M
             retries = 0
             while retries < max_retries:
                 try:
-                    response = requests.get(f'https://backend.wplace.live/files/s0/tiles/{x}/{y}.png', headers={"User-Agent": UA, "Accept": "image/webp,*/*", "Referer": "https://www.wplace.live/"}, timeout=10)
+                    response = requests.get(f'https://backend.wplace.live/files/s0/tiles/{x}/{y}.png', proxies=proxies, headers={"User-Agent": UA, "Accept": "image/webp,*/*", "Referer": "https://www.wplace.live/"}, timeout=10)
                     if response.status_code == 200:
                         with open(f"{save_dir}{os.path.sep}{x}_{y}{FILE_EXTENSION}", "wb") as f:
                             f.write(response.content)
@@ -94,21 +103,27 @@ def poke_author(TlX, TlY, PxX, PxY, retries=MAX_RETRIES, delay=DELAY):
     err_delay=delay
     retrie = 0
     while retrie < retries:
-        response = SCRAPER.get(f'https://backend.wplace.live/s0/pixel/{TlX}/{TlY}?x={PxX}&y={PxY}')
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("paintedBy").get("id") != "":
-                print(f'[OK] TlX: {TlX}, TlY: {TlY}, PxX: {PxX}, PxY: {PxY}, 获取点作者成功: {data["paintedBy"]}')
-                return data["paintedBy"]
+        try:
+            response = SCRAPER.get(f'https://backend.wplace.live/s0/pixel/{TlX}/{TlY}?x={PxX}&y={PxY}', proxies=proxies)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("paintedBy").get("id") != "":
+                    print(f'[OK] TlX: {TlX}, TlY: {TlY}, PxX: {PxX}, PxY: {PxY}, 获取点作者成功: {data["paintedBy"]}')
+                    return data["paintedBy"]
+                else:
+                    print('[INFO] 该像素无作者信息')
+                    return None
             else:
-                print('[INFO] 该像素无作者信息')
-                return None
-        else:
-            retrie += 1
-            err_delay += 1
-            print(f'[WARN] 状态码 {response.status_code}, 重试第 {retrie} 次')
+                retrie += 1
+                err_delay += 1
+                print(f'[WARN] 状态码 {response.status_code}, 重试第 {retrie} 次')
+                time.sleep(err_delay)
+            time.sleep(delay)
+        except Exception as e:
+            print(e)
             time.sleep(err_delay)
-        time.sleep(delay)
+            err_delay *= 2
+            continue
     return None
 
 
