@@ -27,6 +27,7 @@ MONITOR_BOTTOM=int(config["MONITOR_BOTTOM"])
 BACKUP=env_bool(config.get("BACKUP", True))
 BACKUP_SCHEDULE= config.get("BACKUP_SCHEDULE", "* /30 * * * *")
 BLACK_LIST=ast.literal_eval(config.get("BLACK_LIST", "[]"))
+BLACK_ALLIANCENAME_LIST=ast.literal_eval(config.get("BLACK_ALLIANCENAME_LIST", "[]"))
 BACKUP_BLACKED=env_bool(config.get("BACKUP_BLACKED",True))
 ONLY_OVERLAY=env_bool(config.get("ONLY_OVERLAY",False))
 LOOP_SLEEP=int(config["LOOP_SLEEP"])
@@ -42,7 +43,7 @@ DELAY=1 # 每个请求和重试间延迟，单位秒
 MODEL_DIR="model" # 模板目录
 COMPARISON_DIR=os.path.join(MODEL_DIR, 'comparison') # 比较目录
 BACKUP_DIR="backup" # 备份目录
-BACKUP_BLACKED=os.path.join(BACKUP_DIR, 'black') # 黑名单涂鸦备份
+BACKUP_BLACKED_DIR=os.path.join(BACKUP_DIR, 'black') # 黑名单涂鸦备份
 
 # 杂项
 FILE_EXTENSION=".png"
@@ -90,10 +91,10 @@ def backup_area(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=
 返回: None / {id: 123, name: "321"}
 """
 def poke_author(TlX, TlY, PxX, PxY, retries=MAX_RETRIES, delay=DELAY):
+    err_delay=delay
     retrie = 0
     while retrie < retries:
         response = SCRAPER.get(f'https://backend.wplace.live/s0/pixel/{TlX}/{TlY}?x={PxX}&y={PxY}')
-        print(f'https://backend.wplace.live/s0/pixel/{TlX}/{TlY}?x={PxX}&y={PxY}')
         if response.status_code == 200:
             data = response.json()
             if data.get("paintedBy").get("id") != "":
@@ -104,7 +105,9 @@ def poke_author(TlX, TlY, PxX, PxY, retries=MAX_RETRIES, delay=DELAY):
                 return None
         else:
             retrie += 1
-            print(f'[WARN] 状态码 {response.status_code}, {response.content}, 重试第 {retrie} 次')
+            err_delay += 1
+            print(f'[WARN] 状态码 {response.status_code}, 重试第 {retrie} 次')
+            time.sleep(err_delay)
         time.sleep(delay)
     return None
 
@@ -162,7 +165,6 @@ def map_check(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MO
     # 遍历比较每一张图
     for _, _, compfiles in os.walk(COMPARISON_DIR):
         for comp_item in compfiles:
-            print(comp_item)
             model_path = os.path.join(model_dir, comp_item)
             comparison_path = os.path.join(comparison_dir, comp_item)
             if not os.path.exists(model_path):
@@ -194,7 +196,7 @@ def map_check(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MO
 
                 for Px, author in zip(diff_pixels, results_iter):
                     print(f'Px" {Px}')
-                    if author is not None and str(author["id"]) in BLACK_LIST:
+                    if author is not None and (str(author["id"]) in BLACK_LIST or str(author["allianceName"]) in BLACK_ALLIANCENAME_LIST):
                         changes_flag = True
                         color_origin = model_img_data[Px[1]*model_img_width+Px[0]]
                         print(f'[INFO] [!] 发现黑名单用户 {author["name"]}#{author["id"]} 修改 [{Tl[0]} {Tl[1]} {Px[0]} {Px[1]}], 图片原颜色: {color_origin}')
@@ -203,6 +205,8 @@ def map_check(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MO
                         comparison_img.putpixel((Px[0],Px[1]), color_origin)
 
             if color_adjust:
+                if BACKUP_BLACKED:
+                    shutil.copy(comparison_path, BACKUP_BLACKED_DIR+os.path.sep+comp_item)
                 taskBody = {
                     "taskname": f'WRE_{time.strftime("%Y%m%d%H%M")}_{Tl[0]}x{Tl[1]}',
                     "mark": [{"TlX": item[0][0], "TlY": item[0][1], "PxX": item[0][2], "PxY": item[0][3], "color": f'{item[1][0]},{item[1][1]},{item[1][2]}'} for item in color_adjust]
@@ -211,7 +215,7 @@ def map_check(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MO
                 send_task(taskBody)
                 # print(taskBody) # {"taskname": "WRE_202508241001_1687x797", "mark": [{"TlX": 1687, "TlY": 797, "PxX": 18, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 19, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 20, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 21, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 22, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 20, "PxY": 7, "color": "120,120,120"}]}
                 comparison_img.save(comparison_path)
-                shutil.copy(comparison_path, model_path)
+            shutil.copy(comparison_path, model_path)
     return changes_flag
 
 """
@@ -236,7 +240,7 @@ def init():
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(COMPARISON_DIR, exist_ok=True)
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    os.makedirs(BACKUP_BLACKED, exist_ok=True)
+    os.makedirs(BACKUP_BLACKED_DIR, exist_ok=True)
 
     # 设置备份定时任务
     if BACKUP:

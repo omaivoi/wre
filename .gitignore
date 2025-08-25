@@ -1,3 +1,4 @@
 backup/**
 model/**
 test.py
+venv/**
