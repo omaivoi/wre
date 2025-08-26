@@ -1,6 +1,6 @@
 import ast
 import json
-from idlelib.configdialog import changes
+import logging
 
 import cloudscraper
 import dotenv
@@ -12,6 +12,7 @@ import io
 from PIL import Image, ImageChops
 from apscheduler.schedulers.background import BackgroundScheduler
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 
 def env_bool(value):
@@ -20,10 +21,7 @@ def env_bool(value):
 # env文件
 config = dotenv.dotenv_values(".env")
 WPLACER_URL = f'http://{config["WPLACER_HOST"]}:{config["WPLACER_PORT"]}' if config.get("WPLACER_PORT") else f'http://{config["WPLACER_HOST"]}'
-MONITOR_LEFT=int(config["MONITOR_LEFT"])
-MONITOR_TOP=int(config["MONITOR_TOP"])
-MONITOR_RIGHT=int(config["MONITOR_RIGHT"])
-MONITOR_BOTTOM=int(config["MONITOR_BOTTOM"])
+MONITOR_AREA=ast.literal_eval(config.get("MONITOR_AREA", "[]"))
 BACKUP=env_bool(config.get("BACKUP", True))
 BACKUP_SCHEDULE= config.get("BACKUP_SCHEDULE", "* /30 * * * *")
 BLACK_LIST=ast.literal_eval(config.get("BLACK_LIST", "[]"))
@@ -53,15 +51,48 @@ MODEL_DIR="model" # 模板目录
 COMPARISON_DIR=os.path.join(MODEL_DIR, 'comparison') # 比较目录
 BACKUP_DIR="backup" # 备份目录
 BACKUP_BLACKED_DIR=os.path.join(BACKUP_DIR, 'black') # 黑名单涂鸦备份
+LOG_DIR="logs" # 日志目录
+LOG_FILE = os.path.join(LOG_DIR, "info.log") # 日志文件
+
+# 创建目录
+os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(COMPARISON_DIR, exist_ok=True)
+os.makedirs(BACKUP_DIR, exist_ok=True)
+os.makedirs(BACKUP_BLACKED_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # 杂项
 FILE_EXTENSION=".png"
 SCRAPER = cloudscraper.create_scraper()
+def get_daily_logger():
+    now_str = datetime.now().strftime("%Y%m%d%H%M")
+    log_filename = os.path.join(LOG_DIR, f"l{now_str}_info.log") # 每天一个日志文件
 
+    logger = logging.getLogger("daily_info")
+    logger.setLevel(logging.INFO)
+
+    if not logger.handlers:
+        handler = logging.FileHandler(log_filename, mode='a', encoding='utf-8')
+        formatter = logging.Formatter(
+            "[%(asctime)s] [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+        # 控制台输出（可选）
+        console = logging.StreamHandler()
+        console.setLevel(logging.INFO)
+        console.setFormatter(formatter)
+        logger.addHandler(console)
+
+    return logger
+
+logger = get_daily_logger()
 """
 # 地区涂鸦下载
 """
-def clone_area(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MONITOR_BOTTOM, max_retries=MAX_RETRIES, delay=DELAY, save_dir=MODEL_DIR):
+def clone_area(left, top, right, bottom, max_retries=MAX_RETRIES, delay=DELAY, save_dir=MODEL_DIR):
     for x in range(left, right + 1):
         for y in range(top, bottom + 1):
             retries = 0
@@ -71,29 +102,33 @@ def clone_area(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=M
                     if response.status_code == 200:
                         with open(f"{save_dir}{os.path.sep}{x}_{y}{FILE_EXTENSION}", "wb") as f:
                             f.write(response.content)
-                        print(f'[OK] ({x},{y}) 下载成功')
+                        logger.info(f'[OK] ({x},{y}) 下载成功')
                         break
                     elif response.status_code == 404:
-                        print(f'[INFO] ({x},{y}) 图块不存在，跳过')
+                        logger.info(f'[INFO] ({x},{y}) 图块不存在，跳过')
                         break
                     else:
                         retries += 1
-                        print(f'[WARN] ({x},{y}) 状态码 {response.status_code}，重试第 {retries} 次')
+                        logger.info(f'[WARN] ({x},{y}) 状态码 {response.status_code}，重试第 {retries} 次')
                 except requests.exceptions.RequestException as e:
                     retries += 1
-                    print(f'[ERROR] ({x},{y}) 请求失败: {e}，重试第 {retries} 次')
+                    logger.info(f'[ERROR] ({x},{y}) 请求失败: {e}，重试第 {retries} 次')
                 time.sleep(delay)
 
 
 """
 # 地区涂鸦备份
 """
-def backup_area(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MONITOR_BOTTOM, max_retries=MAX_RETRIES, delay=DELAY, backup_dir=BACKUP_DIR):
-    print(f'[INFO] 开始备份')
+def backup_area(left, top, right, bottom, max_retries=MAX_RETRIES, delay=DELAY, backup_dir=BACKUP_DIR):
+    logger.info(f'[INFO] 开始备份, 备份区域: left={left}, top={top}, right={right}, bottom={bottom}')
     backup_folder = f'{backup_dir}{os.path.sep}{time.strftime("%Y%m%d%H%M")}_backup'
     os.makedirs(backup_folder, exist_ok=True)
     clone_area(left=left, top=top, right=right, bottom=bottom, max_retries=max_retries, delay=delay, save_dir=backup_folder)
-
+def backup_job():
+    for area in MONITOR_AREA:
+        MONITOR_LEFT, MONITOR_TOP, MONITOR_RIGHT, MONITOR_BOTTOM = area[0], area[1], area[2], area[3]
+        backup_area(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MONITOR_BOTTOM)
+    logger.info('[INFO] 备份完成')
 
 """
 # 获取点作者
@@ -108,19 +143,19 @@ def poke_author(TlX, TlY, PxX, PxY, retries=MAX_RETRIES, delay=DELAY):
             if response.status_code == 200:
                 data = response.json()
                 if data.get("paintedBy").get("id") != "":
-                    print(f'[OK] TlX: {TlX}, TlY: {TlY}, PxX: {PxX}, PxY: {PxY}, 获取点作者成功: {data["paintedBy"]}')
+                    logger.info(f'[OK] TlX: {TlX}, TlY: {TlY}, PxX: {PxX}, PxY: {PxY}, 获取点作者成功: {data["paintedBy"]}')
                     return data["paintedBy"]
                 else:
-                    print('[INFO] 该像素无作者信息')
+                    logger.info('[INFO] TlX: {TlX}, TlY: {TlY}, PxX: {PxX}, PxY: {PxY}, 该像素无作者信息')
                     return None
             else:
                 retrie += 1
                 err_delay += 1
-                print(f'[WARN] 状态码 {response.status_code}, 重试第 {retrie} 次')
+                logger.info(f'[WARN] 状态码 {response.status_code}, 重试第 {retrie} 次')
                 time.sleep(err_delay)
             time.sleep(delay)
         except Exception as e:
-            print(e)
+            logger.info(e)
             time.sleep(err_delay)
             err_delay *= 2
             continue
@@ -173,7 +208,7 @@ def pixel_comparator(modelImg_path, comparImg_path):
 # 区域变更处理器
 返回: True: 需要恢复像素, False: 不需要恢复像素
 """
-def map_check(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MONITOR_BOTTOM, max_retries=MAX_RETRIES, delay=DELAY, model_dir=MODEL_DIR, comparison_dir=COMPARISON_DIR):
+def map_check(left, top, right, bottom, max_retries=MAX_RETRIES, delay=DELAY, model_dir=MODEL_DIR, comparison_dir=COMPARISON_DIR):
     changes_flag = False
     # 克隆对比图
     clone_area(left=left, top=top, right=right, bottom=bottom, max_retries=max_retries, delay=delay, save_dir=COMPARISON_DIR)
@@ -187,9 +222,9 @@ def map_check(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MO
                 continue
             diff_pixels = pixel_comparator(model_path, comparison_path)
             if diff_pixels is None or diff_pixels == 0 or diff_pixels == []:
-                print(f'{comp_item} 不需恢复')
+                logger.info(f'{comp_item} 不需恢复')
                 continue
-            print(f'[INFO] {comp_item} 发现 {len(diff_pixels)} 个不同像素')
+            logger.info(f'[INFO] {comp_item} 发现 {len(diff_pixels)} 个不同像素')
             Tl = comp_item[:-len(FILE_EXTENSION)].split("_")
             # 用io避免读到缓存图片
             with open(model_path, "rb") as f:
@@ -210,25 +245,24 @@ def map_check(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MO
                 )
 
                 for Px, author in zip(diff_pixels, results_iter):
-                    print(f'Px" {Px}')
                     if author is not None and (str(author["id"]) in BLACK_LIST or str(author["allianceName"]) in BLACK_ALLIANCENAME_LIST):
                         changes_flag = True
                         color_origin = model_img_data[Px[1]*model_img_width+Px[0]]
-                        print(f'[INFO] [!] 发现黑名单用户 {author["name"]}#{author["id"]} 修改 [{Tl[0]} {Tl[1]} {Px[0]} {Px[1]}], 图片原颜色: {color_origin}')
+                        logger.info(f'[INFO] [!] 发现黑名单用户 {author["name"]}#{author["id"]} 修改 [{Tl[0]} {Tl[1]} {Px[0]} {Px[1]}], 图片原颜色: {color_origin}')
                         color_adjust.append(((int(Tl[0]), int(Tl[1]), int(Px[0]), int(Px[1])), color_origin))
                         # 设置颜色, 把comparison_img_data对应位置颜色改成color_origin
                         comparison_img.putpixel((Px[0],Px[1]), color_origin)
 
             if color_adjust:
                 if BACKUP_BLACKED:
-                    shutil.copy(comparison_path, BACKUP_BLACKED_DIR+os.path.sep+comp_item)
+                    shutil.copy(comparison_path, BACKUP_BLACKED_DIR+os.path.sep+time.strftime("%Y%m%d%H%M")+"_"+comp_item)
                 taskBody = {
                     "taskname": f'WRE_{time.strftime("%Y%m%d%H%M")}_{Tl[0]}x{Tl[1]}',
                     "mark": [{"TlX": item[0][0], "TlY": item[0][1], "PxX": item[0][2], "PxY": item[0][3], "color": f'{item[1][0]},{item[1][1]},{item[1][2]}'} for item in color_adjust]
                 }
                 taskBody = json.dumps(taskBody)
                 send_task(taskBody)
-                # print(taskBody) # {"taskname": "WRE_202508241001_1687x797", "mark": [{"TlX": 1687, "TlY": 797, "PxX": 18, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 19, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 20, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 21, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 22, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 20, "PxY": 7, "color": "120,120,120"}]}
+                # logger.info(taskBody) # {"taskname": "WRE_202508241001_1687x797", "mark": [{"TlX": 1687, "TlY": 797, "PxX": 18, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 19, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 20, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 21, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 22, "PxY": 6, "color": "120,120,120"}, {"TlX": 1687, "TlY": 797, "PxX": 20, "PxY": 7, "color": "120,120,120"}]}
                 comparison_img.save(comparison_path)
             shutil.copy(comparison_path, model_path)
     return changes_flag
@@ -242,30 +276,25 @@ def send_task(taskBody):
     try:
         response = requests.post(url, data=taskBody, headers=headers)
         response.raise_for_status()
-        print("[INFO] 任务提交成功:", response.json())
+        logger.info("[INFO] 任务提交成功:", response.json())
     except Exception as e:
-        print("[ERROR] 提交任务失败:", e)
+        logger.info("[ERROR] 提交任务失败:", e)
 
 
 """
 # 初始化
 """
 def init():
-    # 创建目录
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    os.makedirs(COMPARISON_DIR, exist_ok=True)
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    os.makedirs(BACKUP_BLACKED_DIR, exist_ok=True)
 
     # 设置备份定时任务
     if BACKUP:
         scheduler = BackgroundScheduler()
         fields = BACKUP_SCHEDULE.split()
         if len(fields) != 6:
-            print("备份任务设置失败, BACKUP_SCHEDULE 必须是 6 位 cron 表达式")
+            logger.info("备份任务设置失败, BACKUP_SCHEDULE 必须是 6 位 cron 表达式")
         else:
             scheduler.add_job(
-                backup_area,
+                backup_job,
                 'cron',
                 second=fields[0],
                 minute=fields[1],
@@ -280,7 +309,11 @@ def init():
 
 if __name__ == "__main__":
     init()
-    print("开始主程序")
+    logger.info("开始主程序")
     while True:
-        changes_pixel = map_check()
+        changes_pixel = False
+        for area in MONITOR_AREA:
+            logger.info(f'检查区域: {area}')
+            MONITOR_LEFT, MONITOR_TOP, MONITOR_RIGHT, MONITOR_BOTTOM = area[0], area[1], area[2], area[3]
+            if map_check(left=MONITOR_LEFT, top=MONITOR_TOP, right=MONITOR_RIGHT, bottom=MONITOR_BOTTOM) : changes_pixel = True
         time.sleep(LOOP_SLEEP_SHORT if changes_pixel else LOOP_SLEEP)
