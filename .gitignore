@@ -2,3 +2,4 @@ backup/**
 model/**
 test.py
 venv/**
+logs/**
