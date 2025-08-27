@@ -2,4 +2,5 @@ backup/**
 model/**
 test.py
 venv/**
+.venv/**
 logs/**

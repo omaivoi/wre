@@ -9,10 +9,12 @@ import requests
 import shutil
 import time
 import io
+import numpy as np
 from PIL import Image, ImageChops
 from apscheduler.schedulers.background import BackgroundScheduler
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from fake_useragent import UserAgent
 
 
 def env_bool(value):
@@ -42,7 +44,8 @@ if HTTP_PROXY and HTTPS_PROXY:
     }
 else:
     proxies = None
-UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+USERAGENT=UserAgent()
+UA=USERAGENT.edge
 MAX_RETRIES=999999 # 最大重试次数
 DELAY=1 # 每个请求和重试间延迟，单位秒
 
@@ -102,10 +105,10 @@ def clone_area(left, top, right, bottom, max_retries=MAX_RETRIES, delay=DELAY, s
                     if response.status_code == 200:
                         with open(f"{save_dir}{os.path.sep}{x}_{y}{FILE_EXTENSION}", "wb") as f:
                             f.write(response.content)
-                        logger.info(f'[OK] ({x},{y}) 下载成功')
+                        print(f'[OK] ({x},{y}) 下载成功')
                         break
                     elif response.status_code == 404:
-                        logger.info(f'[INFO] ({x},{y}) 图块不存在，跳过')
+                        print(f'[INFO] ({x},{y}) 图块不存在，跳过')
                         break
                     else:
                         retries += 1
@@ -139,11 +142,12 @@ def poke_author(TlX, TlY, PxX, PxY, retries=MAX_RETRIES, delay=DELAY):
     retrie = 0
     while retrie < retries:
         try:
-            response = SCRAPER.get(f'https://backend.wplace.live/s0/pixel/{TlX}/{TlY}?x={PxX}&y={PxY}', proxies=proxies)
+            response = SCRAPER.get(f'https://backend.wplace.live/s0/pixel/{TlX}/{TlY}?x={PxX}&y={PxY}', proxies=proxies, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("paintedBy").get("id") != "":
                     logger.info(f'[OK] TlX: {TlX}, TlY: {TlY}, PxX: {PxX}, PxY: {PxY}, 获取点作者成功: {data["paintedBy"]}')
+                    # logger.recode
                     return data["paintedBy"]
                 else:
                     logger.info('[INFO] TlX: {TlX}, TlY: {TlY}, PxX: {PxX}, PxY: {PxY}, 该像素无作者信息')
@@ -168,9 +172,26 @@ def poke_author(TlX, TlY, PxX, PxY, retries=MAX_RETRIES, delay=DELAY):
        comparImg_path: 新图
 返回: None: 图片无效
         0: 图片相同
-        [空]: ONLY_OVERLAY为true,黑名单用户画了图,但是没修改别人的画
+        [空]: ONLY_OVERLAY为true,存在用户画了图,但是没修改别人的画
         [[],[],[]]: 具体不相同的像素点
 """
+
+
+# diff = ImageChops.difference(img1, img2) # 这种比对方式有概率忽略像素点
+# diff_pixels = []
+# width, height = diff.size
+# img1_data = img1.getdata()
+# diff_data = diff.getdata()
+#
+# for y in range(height):
+#     for x in range(width):
+#         r, g, b, a = diff_data[y * width + x]
+#         if (r, g, b, a) != (0, 0, 0, 0):
+#             origin_a = img1_data[y * width + x][3]
+#             if not ONLY_OVERLAY or origin_a > 0:
+#                 diff_pixels.append((x, y, img1_data[y * width + x]))
+#
+# return diff_pixels
 def pixel_comparator(modelImg_path, comparImg_path):
     if (not os.path.exists(modelImg_path)) or (not os.path.exists(comparImg_path)):
         return None
@@ -178,28 +199,33 @@ def pixel_comparator(modelImg_path, comparImg_path):
     # 某种神奇的缓存机制总是读到旧版图片, io确保读到的图片一定是最新的
     with open(modelImg_path, "rb") as f:
         img1 = Image.open(io.BytesIO(f.read())).convert("RGBA").copy()
+        img1np = np.array(img1)
     with open(comparImg_path, "rb") as f:
         img2 = Image.open(io.BytesIO(f.read())).convert("RGBA").copy()
+        img2np = np.array(img2)
 
-    if img1.size != img2.size:
+    if img1np.shape != img2np.shape:
         return None
 
-    diff = ImageChops.difference(img1, img2)
-    if not diff.getbbox():
+    # 找出不同像素的布尔掩码：在任意 RGBA 通道不同的像素
+    diff_mask = np.any(img1np != img2np, axis=-1)
+
+    # 如果图片完全相同，返回 0
+    if not np.any(diff_mask):
         return 0
 
-    diff_pixels = []
-    width, height = diff.size
-    img1_data = img1.getdata()
-    diff_data = diff.getdata()
+    if ONLY_OVERLAY:
+        # 只比较原图非透明的像素
+        overlay_mask = img1np[..., 3] > 0
+        final_mask = diff_mask & overlay_mask
+    else:
+        final_mask = diff_mask
 
-    for y in range(height):
-        for x in range(width):
-            r, g, b, a = diff_data[y * width + x]
-            if (r, g, b, a) != (0, 0, 0, 0):
-                origin_a = img1_data[y * width + x][3]
-                if not ONLY_OVERLAY or origin_a > 0:
-                    diff_pixels.append((x, y, img1_data[y * width + x]))
+    # 获取所有不同的像素坐标 (y, x)
+    diff_coordinates = np.argwhere(final_mask)
+
+    # 提取像素信息
+    diff_pixels = [(x, y, tuple(img1np[y, x])) for y, x in diff_coordinates]
 
     return diff_pixels
 
@@ -222,7 +248,7 @@ def map_check(left, top, right, bottom, max_retries=MAX_RETRIES, delay=DELAY, mo
                 continue
             diff_pixels = pixel_comparator(model_path, comparison_path)
             if diff_pixels is None or diff_pixels == 0 or diff_pixels == []:
-                logger.info(f'{comp_item} 不需恢复')
+                logger.info(f'{comp_item} 不需恢复, 因为 {"图片无效" if diff_pixels is None else "图片相同" if diff_pixels == 0 else "ONLY_OVERLAY为true,存在用户画了图,但是没修改别人的画"}')
                 continue
             logger.info(f'[INFO] {comp_item} 发现 {len(diff_pixels)} 个不同像素')
             Tl = comp_item[:-len(FILE_EXTENSION)].split("_")
@@ -271,6 +297,7 @@ def map_check(left, top, right, bottom, max_retries=MAX_RETRIES, delay=DELAY, mo
 # 画图任务管理器
 """
 def send_task(taskBody):
+    logger.info(f'[INFO] 提交任务: {taskBody}')
     url = f'{WPLACER_URL}/pixelTask'
     headers = {"Content-Type": "application/json"}
     try:
