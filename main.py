@@ -1,20 +1,21 @@
 import ast
+import io
 import json
-import logging
+import os
+import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import cloudscraper
 import dotenv
-import os
-import requests
-import shutil
-import time
-import io
 import numpy as np
-from PIL import Image, ImageChops
+import requests
+from PIL import Image
 from apscheduler.schedulers.background import BackgroundScheduler
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from fake_useragent import UserAgent
+
+from MySQLManager import MySQLManager
+from logger_config import logger
 
 
 def env_bool(value):
@@ -35,6 +36,15 @@ LOOP_SLEEP_SHORT=int(config["LOOP_SLEEP_SHORT"])
 MAX_GETPOKEAUTHOR_THREAD=int(config["MAX_GETPOKEAUTHOR_THREAD"])
 HTTP_PROXY = config.get("HTTP_PROXY")
 HTTPS_PROXY = config.get("HTTPS_PROXY")
+MYSQLDB_CONFIG = {
+    "host": config.get("MYSQL_HOST", "localhost"),
+    "port": int(config.get("MYSQL_PORT", 3306)),
+    "user": config.get("MYSQL_USER", "root"),
+    "password": config.get("MYSQL_PASSWORD", ""),
+    "database": config.get("MYSQL_DATABASE", "wplacedotrecode"),
+    "charset": "utf8mb4",
+    "init_command": "SET time_zone = '+8:00'"
+}
 
 # 请求配置
 if HTTP_PROXY and HTTPS_PROXY:
@@ -54,44 +64,24 @@ MODEL_DIR="model" # 模板目录
 COMPARISON_DIR=os.path.join(MODEL_DIR, 'comparison') # 比较目录
 BACKUP_DIR="backup" # 备份目录
 BACKUP_BLACKED_DIR=os.path.join(BACKUP_DIR, 'black') # 黑名单涂鸦备份
-LOG_DIR="logs" # 日志目录
-LOG_FILE = os.path.join(LOG_DIR, "info.log") # 日志文件
 
 # 创建目录
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(COMPARISON_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 os.makedirs(BACKUP_BLACKED_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
 
 # 杂项
 FILE_EXTENSION=".png"
+
 SCRAPER = cloudscraper.create_scraper()
-def get_daily_logger():
-    now_str = datetime.now().strftime("%Y%m%d%H%M")
-    log_filename = os.path.join(LOG_DIR, f"l{now_str}_info.log") # 每天一个日志文件
 
-    logger = logging.getLogger("daily_info")
-    logger.setLevel(logging.INFO)
+MYSQLDB_TABLE_CONFIG = {
+    "dot_recode": "dot_recode"
+}
 
-    if not logger.handlers:
-        handler = logging.FileHandler(log_filename, mode='a', encoding='utf-8')
-        formatter = logging.Formatter(
-            "[%(asctime)s] [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        )
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
+MYSQLDB = MySQLManager(MYSQLDB_CONFIG, MYSQLDB_TABLE_CONFIG)
 
-        # 控制台输出（可选）
-        console = logging.StreamHandler()
-        console.setLevel(logging.INFO)
-        console.setFormatter(formatter)
-        logger.addHandler(console)
-
-    return logger
-
-logger = get_daily_logger()
 """
 # 地区涂鸦下载
 """
@@ -258,6 +248,7 @@ def map_check(left, top, right, bottom, max_retries=MAX_RETRIES, delay=DELAY, mo
             with open(comparison_path, "rb") as f:
                 comparison_img = Image.open(io.BytesIO(f.read())).convert("RGBA").copy()
             model_img_data = model_img.getdata()
+            comparison_img_data = comparison_img.getdata()
             model_img_width, model_img_height = model_img.size
 
             # 固化成列表，避免生成器被消费
@@ -270,14 +261,29 @@ def map_check(left, top, right, bottom, max_retries=MAX_RETRIES, delay=DELAY, mo
                     diff_pixels
                 )
 
+                insert_recode_sql = f'INSERT INTO {MYSQLDB_TABLE_CONFIG["dot_recode"]}(pointer_name, pointer_id, pointer_alliancename, TlX, TlY, PxX, PxY, color_origin, color_now) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)'
+                recode_list = []
                 for Px, author in zip(diff_pixels, results_iter):
-                    if author is not None and (str(author["id"]) in BLACK_LIST or str(author["allianceName"]) in BLACK_ALLIANCENAME_LIST):
-                        changes_flag = True
+                    if author is not None:
                         color_origin = model_img_data[Px[1]*model_img_width+Px[0]]
-                        logger.info(f'[INFO] [!] 发现黑名单用户 {author["name"]}#{author["id"]} 修改 [{Tl[0]} {Tl[1]} {Px[0]} {Px[1]}], 图片原颜色: {color_origin}')
-                        color_adjust.append(((int(Tl[0]), int(Tl[1]), int(Px[0]), int(Px[1])), color_origin))
-                        # 设置颜色, 把comparison_img_data对应位置颜色改成color_origin
-                        comparison_img.putpixel((Px[0],Px[1]), color_origin)
+                        color_now = comparison_img_data[Px[1]*model_img_width+Px[0]]
+                        # 像素修改记录存档
+                        recode_list.append((str(author["name"]), str(author["id"]), str(author["allianceName"]), int(Tl[0]), int(Tl[1]), int(Px[0]), int(Px[1]), str(color_origin), str(color_now)))
+                        # 像素黑名单修改记录回档
+                        if (str(author["id"]) in BLACK_LIST or str(author["allianceName"]) in BLACK_ALLIANCENAME_LIST):
+                            changes_flag = True
+                            logger.info(f'[INFO] [!] 发现黑名单用户 {author["name"]}#{author["id"]} 修改 [{Tl[0]} {Tl[1]} {Px[0]} {Px[1]}], 图片原颜色: {color_origin} => 修改为 {color_now}')
+                            color_adjust.append(((int(Tl[0]), int(Tl[1]), int(Px[0]), int(Px[1])), color_origin))
+                            # 设置颜色, 把comparison_img_data对应位置颜色改成color_origin
+                            comparison_img.putpixel((Px[0],Px[1]), color_origin)
+                    else:
+                        logger.info(f'[INFO] [?] 未知异常: [{Tl[0]} {Tl[1]} {Px[0]} {Px[1]}] 无法获取作者,不处理')
+                if recode_list:
+                    if MYSQLDB.conn is None:
+                        logger.info('[ERROR] 数据库连接不可用, 像素修改记录写入数据库失败, 记录将回退到日志文件')
+                        MYSQLDB.write_recode_log(insert_recode_sql, recode_list)
+                    else:
+                        MYSQLDB.insert(insert_recode_sql, recode_list)
 
             if color_adjust:
                 if BACKUP_BLACKED:

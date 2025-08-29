@@ -4,3 +4,6 @@ test.py
 venv/**
 .venv/**
 logs/**
+.env
+dbmiss/**
+__pycache__/**
