@@ -1,0 +1,6 @@
+[submodule "glider_guid"]
+	path = glider_guid
+	url = https://github.com/Rain-kl/glider_guid.git
+[submodule "wplacer"]
+	path = wplacer
+	url = https://github.com/omaivoi/wplacer.git
