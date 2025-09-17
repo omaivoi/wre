@@ -4,6 +4,8 @@ import json
 import os
 import shutil
 import time
+import glob
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import cloudscraper
@@ -54,6 +56,13 @@ if HTTP_PROXY and HTTPS_PROXY:
     }
 else:
     proxies = None
+
+proxies_cloudscraper = []
+if HTTP_PROXY:
+    proxies_cloudscraper.append(HTTP_PROXY)
+if HTTPS_PROXY:
+    proxies_cloudscraper.append(HTTPS_PROXY)
+
 USERAGENT=UserAgent()
 UA=USERAGENT.edge
 MAX_RETRIES=999999 # 最大重试次数
@@ -74,13 +83,22 @@ os.makedirs(BACKUP_BLACKED_DIR, exist_ok=True)
 # 杂项
 FILE_EXTENSION=".png"
 
-SCRAPER = cloudscraper.create_scraper()
-
 MYSQLDB_TABLE_CONFIG = {
     "dot_recode": "dot_recode"
 }
 
 MYSQLDB = MySQLManager(MYSQLDB_CONFIG, MYSQLDB_TABLE_CONFIG)
+
+# 让 cloudscraper 变成“线程本地”
+_tls = threading.local()
+
+def get_thread_scraper():
+    s = getattr(_tls, "scraper", None)
+    if s is None:
+        s = cloudscraper.create_scraper()
+        s.keep_alive = False
+        _tls.scraper = s
+    return s
 
 """
 # 地区涂鸦下载
@@ -128,19 +146,22 @@ def backup_job():
 返回: None / {id: 123, name: "321"}
 """
 def poke_author(TlX, TlY, PxX, PxY, retries=MAX_RETRIES, delay=DELAY):
-    err_delay=delay
+    err_delay = delay
     retrie = 0
+    s = get_thread_scraper()  # 使用线程本地的 scraper
     while retrie < retries:
         try:
-            response = SCRAPER.get(f'https://backend.wplace.live/s0/pixel/{TlX}/{TlY}?x={PxX}&y={PxY}', proxies=proxies, timeout=10)
+            response = s.get(
+                f'https://backend.wplace.live/s0/pixel/{TlX}/{TlY}?x={PxX}&y={PxY}',
+                proxies=proxies, timeout=10
+            )
             if response.status_code == 200:
                 data = response.json()
                 if data.get("paintedBy").get("id") != "":
-                    logger.info(f'[OK] TlX: {TlX}, TlY: {TlY}, PxX: {PxX}, PxY: {PxY}, 获取点作者成功: {data["paintedBy"]}')
-                    # logger.recode
+                    logger.info(f'[OK] TlX:{TlX}, TlY:{TlY}, PxX:{PxX}, PxY:{PxY}, 获取点作者成功: {data["paintedBy"]}')
                     return data["paintedBy"]
                 else:
-                    logger.info('[INFO] TlX: {TlX}, TlY: {TlY}, PxX: {PxX}, PxY: {PxY}, 该像素无作者信息')
+                    logger.info(f'[INFO] TlX:{TlX}, TlY:{TlY}, PxX:{PxX}, PxY:{PxY}, 该像素无作者信息')
                     return None
             else:
                 retrie += 1
@@ -154,7 +175,6 @@ def poke_author(TlX, TlY, PxX, PxY, retries=MAX_RETRIES, delay=DELAY):
             err_delay *= 2
             continue
     return None
-
 
 """
 像素比较器
@@ -225,6 +245,13 @@ def pixel_comparator(modelImg_path, comparImg_path):
 返回: True: 需要恢复像素, False: 不需要恢复像素
 """
 def map_check(left, top, right, bottom, max_retries=MAX_RETRIES, delay=DELAY, model_dir=MODEL_DIR, comparison_dir=COMPARISON_DIR):
+    # 清空对比目录，避免上一轮/上一区域的文件残留导致重复处理
+    for p in glob.glob(os.path.join(comparison_dir, f"*{FILE_EXTENSION}")):
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+
     changes_flag = False
     # 克隆对比图
     clone_area(left=left, top=top, right=right, bottom=bottom, max_retries=max_retries, delay=delay, save_dir=COMPARISON_DIR)
